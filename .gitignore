@@ -1,0 +1,45 @@
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*.user
+*.suo
+*.VC.db
+
+# Build outputs
+build/
+dist/
+out/
+bin/
+obj/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+*.out
+*.elf
+*.map
+
+# CMake and tooling cache
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Testing/
+
+# Local test binaries
+tests/test_all
+tests/test_all.exe
+
+git.txt

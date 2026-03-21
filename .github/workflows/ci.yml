@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build tests
+        run: |
+          cc -std=c99 -Wall -Wextra -Wpedantic -Werror \
+             -Iinclude src/mwdt.c tests/test_all.c -o tests/test_all
+
+      - name: Run tests
+        run: ./tests/test_all
+
