@@ -2,22 +2,138 @@ name: CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
 
 jobs:
-  test:
+  linux-gcc:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        std: [c99, c11]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y gcc cmake ninja-build
+      - name: Compiler version
+        run: gcc --version
+      - name: Build runtime test
+        run: >
+          gcc -std=${{ matrix.std }} -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+          -Wshadow -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wformat=2 -Werror
+          -Iinclude src/mwdt.c tests/test_all.c -o tests/test_all
+      - name: Run runtime test
+        run: ./tests/test_all
+      - name: CMake configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=gcc
+      - name: CMake build
+        run: cmake --build build
+      - name: CTest
+        run: ctest --test-dir build --output-on-failure
+
+  linux-clang:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        std: [c99, c11]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build
+      - name: Compiler version
+        run: clang --version
+      - name: Build runtime test
+        run: >
+          clang -std=${{ matrix.std }} -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion
+          -Wshadow -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wformat=2 -Werror
+          -Iinclude src/mwdt.c tests/test_all.c -o tests/test_all
+      - name: Run runtime test
+        run: ./tests/test_all
+      - name: CMake configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+      - name: CMake build
+        run: cmake --build build
+      - name: CTest
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build
+      - name: ASan and UBSan runtime build
+        run: >
+          clang -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer
+          -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow
+          -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wformat=2 -Werror
+          -Iinclude src/mwdt.c tests/test_all.c -o tests/test_all_san
+      - name: ASan and UBSan runtime test
+        run: ./tests/test_all_san
 
-      - name: Build tests
-        run: |
-          cc -std=c99 -Wall -Wextra -Wpedantic -Werror \
-             -Iinclude src/mwdt.c tests/test_all.c -o tests/test_all
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y clang clang-tidy clang-tools cppcheck cmake ninja-build
+      - name: CMake configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+      - name: clang-tidy
+        run: clang-tidy src/mwdt.c tests/test_all.c -- -Iinclude
+      - name: cppcheck
+        run: cppcheck --enable=warning,style,performance,portability --error-exitcode=1 --inline-suppr --std=c99 include src tests
+      - name: scan-build
+        run: scan-build --status-bugs cmake --build build
 
-      - name: Run tests
-        run: ./tests/test_all
+  install-consumer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++
+      - name: Configure
+        run: cmake -S . -B build -G Ninja
+      - name: Build
+        run: cmake --build build
+      - name: Install
+        run: cmake --install build --prefix "$PWD/install"
+      - name: External consumer configure
+        run: cmake -S tests/external -B external-build -G Ninja -DCMAKE_PREFIX_PATH="$PWD/install"
+      - name: External consumer build
+        run: cmake --build external-build
+      - name: External consumer run
+        run: ./external-build/microwdt_external_consumer
 
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build
+      - name: Build
+        run: cmake --build build --config Release
+      - name: CTest
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  arm-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install arm-none-eabi-gcc
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+      - name: Compiler version
+        run: arm-none-eabi-gcc --version
+      - name: Compile library
+        run: >
+          arm-none-eabi-gcc -std=c99 -mcpu=cortex-m3 -mthumb -ffreestanding
+          -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow
+          -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wformat=2 -Werror
+          -Iinclude -c src/mwdt.c -o mwdt.o
+      - name: Compile consumer
+        run: >
+          arm-none-eabi-gcc -std=c99 -mcpu=cortex-m3 -mthumb -ffreestanding
+          -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow
+          -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wformat=2 -Werror
+          -Iinclude -c tests/fixtures/readme_example.c -o consumer.o

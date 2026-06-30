@@ -1,5 +1,21 @@
 # Contributing
 
-In scope: bug fixes, docs, tests. Out of scope: dynamic allocation, HW watchdog integration.
-1. Open issue. 2. Fork, branch, test. 3. PR.
-By contributing, you agree to the MIT License.
+In scope:
+
+- bug fixes
+- tests
+- documentation
+- build and packaging improvements that keep the runtime dependency-free
+
+Out of scope:
+
+- dynamic allocation
+- RTOS wrappers
+- hardware watchdog drivers
+- scheduler, logging, panic, or recovery frameworks
+
+Before opening a pull request:
+
+1. Run the runtime test suite.
+2. Run the CMake build and CTest suite if the change touches public headers, build files, or packaging.
+3. Keep the library portable C with caller-owned storage and caller-owned callback contexts.

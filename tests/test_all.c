@@ -1,607 +1,769 @@
-/*
- * microwdt test suite.
- *
- * Build: gcc -std=c99 -Wall -Wextra -I../include ../src/mwdt.c test_all.c -o test_all
- */
-
 #include "mwdt.h"
+
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
-/* ── Test framework ────────────────────────────────────────────────────── */
+typedef struct {
+    uint32_t now_ms;
+    unsigned calls;
+} clock_ctx_t;
 
-static int tests_run = 0, tests_passed = 0, tests_failed = 0;
+typedef enum {
+    CB_MODE_CAPTURE = 0,
+    CB_MODE_BUSY_MUTATIONS,
+    CB_MODE_OPERATE_OTHER
+} cb_mode_t;
 
-#define TEST(name) static void name(void)
-#define RUN_TEST(name) do {                                     \
-    tests_run++;                                                \
-    printf("  %-55s ", #name);                                  \
-    name();                                                     \
-    printf("PASS\n");                                           \
-    tests_passed++;                                             \
-} while (0)
+typedef struct {
+    unsigned calls;
+    mwdt_timeout_t last_event;
+    const mwdt_timeout_t *last_event_ptr;
+    size_t queried_index;
+    mwdt_task_state_t queried_state;
+    uint32_t queried_miss_count;
+    uint32_t queried_transition_count;
+    bool queried_all_ok;
+    mwdt_err_t kick_result;
+    mwdt_err_t disable_result;
+    mwdt_err_t register_result;
+    mwdt_err_t reinit_result;
+    mwdt_err_t nested_check_result;
+    mwdt_err_t set_timeout_result;
+    mwdt_err_t set_reset_result;
+    mwdt_err_t other_result;
+} timeout_log_t;
 
-#define ASSERT_EQ(expected, actual) do {                        \
-    if ((expected) != (actual)) {                               \
-        printf("FAIL\n    %s:%d: expected %d, got %d\n",       \
-               __FILE__, __LINE__, (int)(expected), (int)(actual)); \
-        tests_failed++; return;                                 \
-    }                                                           \
-} while (0)
+typedef struct {
+    unsigned calls;
+    mwdt_timeout_t last_event;
+    mwdt_err_t mutation_result;
+} reset_log_t;
 
-#define ASSERT_TRUE(expr) do {                                  \
-    if (!(expr)) {                                              \
-        printf("FAIL\n    %s:%d: expected true\n",              \
-               __FILE__, __LINE__);                             \
-        tests_failed++; return;                                 \
-    }                                                           \
-} while (0)
+typedef struct {
+    clock_ctx_t clock_a;
+    clock_ctx_t clock_b;
+    timeout_log_t timeout_log;
+    reset_log_t reset_log;
+    mwdt_t wdt_a;
+    mwdt_t wdt_b;
+    mwdt_task_t storage_a[300];
+    mwdt_task_t storage_b[8];
+    cb_mode_t cb_mode;
+} fixture_t;
 
-#define ASSERT_FALSE(expr) do {                                 \
-    if ((expr)) {                                               \
-        printf("FAIL\n    %s:%d: expected false\n",             \
-               __FILE__, __LINE__);                             \
-        tests_failed++; return;                                 \
-    }                                                           \
-} while (0)
+static fixture_t g_fixture;
+static unsigned g_tests_run;
+static unsigned g_tests_passed;
+static unsigned g_tests_failed;
+static unsigned g_assertions;
 
-#define ASSERT_STR_EQ(expected, actual) do {                    \
-    if (strcmp((expected), (actual)) != 0) {                     \
-        printf("FAIL\n    %s:%d: expected \"%s\", got \"%s\"\n",\
-               __FILE__, __LINE__, (expected), (actual));       \
-        tests_failed++; return;                                 \
-    }                                                           \
-} while (0)
-
-#define ASSERT_GE(val, minimum) do {                            \
-    if ((int)(val) < (int)(minimum)) {                          \
-        printf("FAIL\n    %s:%d: %d < %d\n",                   \
-               __FILE__, __LINE__, (int)(val), (int)(minimum)); \
-        tests_failed++; return;                                 \
-    }                                                           \
-} while (0)
-
-/* ── Mock clock ────────────────────────────────────────────────────────── */
-
-static uint32_t mock_time = 1000;
-static uint32_t mock_clock(void) { return mock_time; }
-
-/* ── Timeout tracking ──────────────────────────────────────────────────── */
-
-#define MAX_EVENTS 32
-static mwdt_timeout_t event_log[MAX_EVENTS];
-static int event_count = 0;
-
-static void on_timeout(const mwdt_timeout_t *evt, void *ctx)
+static uint32_t test_clock(void *ctx)
 {
-    (void)ctx;
-    if (event_count < MAX_EVENTS) {
-        event_log[event_count++] = *evt;
+    clock_ctx_t *clock_ctx = (clock_ctx_t *)ctx;
+
+    clock_ctx->calls++;
+    return clock_ctx->now_ms;
+}
+
+static void reset_fixture(void)
+{
+    memset(&g_fixture, 0, sizeof(g_fixture));
+    g_fixture.clock_a.now_ms = 1000U;
+    g_fixture.clock_b.now_ms = 2000U;
+    g_fixture.cb_mode = CB_MODE_CAPTURE;
+}
+
+#define ASSERT_TRUE(expr) \
+    do { \
+        const int mwdt_assert_value = (expr) ? 1 : 0; \
+        g_assertions++; \
+        if (!mwdt_assert_value) { \
+            printf("FAIL\n  %s:%d: expected true: %s\n", __FILE__, __LINE__, #expr); \
+            return false; \
+        } \
+    } while (0)
+
+#define ASSERT_FALSE(expr) \
+    do { \
+        const int mwdt_assert_value = (expr) ? 1 : 0; \
+        g_assertions++; \
+        if (mwdt_assert_value) { \
+            printf("FAIL\n  %s:%d: expected false: %s\n", __FILE__, __LINE__, #expr); \
+            return false; \
+        } \
+    } while (0)
+
+#define ASSERT_EQ_INT(expected, actual) \
+    do { \
+        const int mwdt_expected_value = (expected); \
+        const int mwdt_actual_value = (actual); \
+        g_assertions++; \
+        if (mwdt_expected_value != mwdt_actual_value) { \
+            printf("FAIL\n  %s:%d: expected %d, got %d\n", __FILE__, __LINE__, mwdt_expected_value, mwdt_actual_value); \
+            return false; \
+        } \
+    } while (0)
+
+#define ASSERT_EQ_U32(expected, actual) \
+    do { \
+        const uint32_t mwdt_expected_value = (expected); \
+        const uint32_t mwdt_actual_value = (actual); \
+        g_assertions++; \
+        if (mwdt_expected_value != mwdt_actual_value) { \
+            printf("FAIL\n  %s:%d: expected %lu, got %lu\n", __FILE__, __LINE__, \
+                (unsigned long)mwdt_expected_value, (unsigned long)mwdt_actual_value); \
+            return false; \
+        } \
+    } while (0)
+
+#define ASSERT_EQ_SIZE(expected, actual) \
+    do { \
+        const size_t mwdt_expected_value = (expected); \
+        const size_t mwdt_actual_value = (actual); \
+        g_assertions++; \
+        if (mwdt_expected_value != mwdt_actual_value) { \
+            printf("FAIL\n  %s:%d: expected %lu, got %lu\n", __FILE__, __LINE__, \
+                (unsigned long)mwdt_expected_value, (unsigned long)mwdt_actual_value); \
+            return false; \
+        } \
+    } while (0)
+
+#define ASSERT_PTR_EQ(expected, actual) \
+    do { \
+        const void *mwdt_expected_value = (expected); \
+        const void *mwdt_actual_value = (actual); \
+        g_assertions++; \
+        if (mwdt_expected_value != mwdt_actual_value) { \
+            printf("FAIL\n  %s:%d: expected %p, got %p\n", __FILE__, __LINE__, mwdt_expected_value, mwdt_actual_value); \
+            return false; \
+        } \
+    } while (0)
+
+#define ASSERT_STR_EQ(expected, actual) \
+    do { \
+        const char *mwdt_expected_value = (expected); \
+        const char *mwdt_actual_value = (actual); \
+        g_assertions++; \
+        if (strcmp(mwdt_expected_value, mwdt_actual_value) != 0) { \
+            printf("FAIL\n  %s:%d: expected \"%s\", got \"%s\"\n", __FILE__, __LINE__, mwdt_expected_value, mwdt_actual_value); \
+            return false; \
+        } \
+    } while (0)
+
+static mwdt_config_t make_config_a(void)
+{
+    mwdt_config_t config;
+
+    memset(&config, 0, sizeof(config));
+    config.tasks = g_fixture.storage_a;
+    config.task_capacity = sizeof(g_fixture.storage_a) / sizeof(g_fixture.storage_a[0]);
+    config.clock_fn = test_clock;
+    config.clock_ctx = &g_fixture.clock_a;
+    return config;
+}
+
+static mwdt_config_t make_config_b(void)
+{
+    mwdt_config_t config;
+
+    memset(&config, 0, sizeof(config));
+    config.tasks = g_fixture.storage_b;
+    config.task_capacity = sizeof(g_fixture.storage_b) / sizeof(g_fixture.storage_b[0]);
+    config.clock_fn = test_clock;
+    config.clock_ctx = &g_fixture.clock_b;
+    return config;
+}
+
+static void timeout_cb(const mwdt_timeout_t *event, void *ctx)
+{
+    timeout_log_t *log = (timeout_log_t *)ctx;
+    mwdt_task_snapshot_t snapshot;
+    uint32_t transition_count = 0U;
+    bool all_ok = false;
+
+    log->calls++;
+    log->last_event = *event;
+    log->last_event_ptr = event;
+    log->queried_index = event->task_index;
+    (void)mwdt_get_task_state(&g_fixture.wdt_a, event->task_index, &log->queried_state);
+    (void)mwdt_get_task(&g_fixture.wdt_a, event->task_index, &snapshot);
+    (void)mwdt_get_transition_event_count(&g_fixture.wdt_a, &transition_count);
+    (void)mwdt_get_all_ok(&g_fixture.wdt_a, &all_ok);
+    log->queried_miss_count = snapshot.miss_count;
+    log->queried_transition_count = transition_count;
+    log->queried_all_ok = all_ok;
+
+    if (g_fixture.cb_mode == CB_MODE_BUSY_MUTATIONS) {
+        size_t nested_out = 0U;
+        size_t throwaway_index = 0U;
+        mwdt_config_t config = make_config_a();
+
+        log->kick_result = mwdt_kick(&g_fixture.wdt_a, event->task_index);
+        log->disable_result = mwdt_enable(&g_fixture.wdt_a, event->task_index, false);
+        log->register_result = mwdt_register(&g_fixture.wdt_a, "nested", 10U, 1U, false, &throwaway_index);
+        log->reinit_result = mwdt_init(&g_fixture.wdt_a, &config);
+        log->nested_check_result = mwdt_check(&g_fixture.wdt_a, &nested_out);
+        log->set_timeout_result = mwdt_set_timeout_cb(&g_fixture.wdt_a, timeout_cb, ctx);
+        log->set_reset_result = mwdt_set_reset_cb(&g_fixture.wdt_a, NULL, NULL);
+    } else if (g_fixture.cb_mode == CB_MODE_OPERATE_OTHER) {
+        log->other_result = mwdt_kick(&g_fixture.wdt_b, 0U);
     }
 }
 
-/* ── Reset tracking ────────────────────────────────────────────────────── */
-
-static int reset_count = 0;
-static void on_reset(void *ctx)
+static void reset_cb(const mwdt_timeout_t *event, void *ctx)
 {
-    (void)ctx;
-    reset_count++;
+    reset_log_t *log = (reset_log_t *)ctx;
+
+    log->calls++;
+    log->last_event = *event;
+    log->mutation_result = mwdt_kick(&g_fixture.wdt_a, event->task_index);
 }
 
-/* ── Setup ─────────────────────────────────────────────────────────────── */
-
-static mwdt_t wdt;
-
-static void reset_all(void)
+static bool init_watchdogs_with_callbacks(void)
 {
-    mock_time = 1000;
-    event_count = 0;
-    reset_count = 0;
-    memset(event_log, 0, sizeof(event_log));
-    mwdt_init(&wdt, mock_clock);
-    mwdt_set_timeout_cb(&wdt, on_timeout, NULL);
-    mwdt_set_reset_cb(&wdt, on_reset, NULL);
-}
+    mwdt_config_t config_a = make_config_a();
+    mwdt_config_t config_b = make_config_b();
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Init
- * ═══════════════════════════════════════════════════════════════════════════ */
+    config_a.timeout_fn = timeout_cb;
+    config_a.timeout_ctx = &g_fixture.timeout_log;
+    config_a.reset_fn = reset_cb;
+    config_a.reset_ctx = &g_fixture.reset_log;
 
-TEST(test_init) {
-    reset_all();
-    ASSERT_EQ(0, mwdt_task_count(&wdt));
-    ASSERT_EQ(0, (int)mwdt_check_count(&wdt));
-    ASSERT_EQ(0, (int)mwdt_timeout_count(&wdt));
-    ASSERT_TRUE(mwdt_all_ok(&wdt));
-}
-
-TEST(test_init_null) {
-    ASSERT_EQ(MWDT_ERR_NULL, mwdt_init(NULL, mock_clock));
-    ASSERT_EQ(MWDT_ERR_NULL, mwdt_init(&wdt, NULL));
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Registration
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-TEST(test_register) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "sensor", 5000, 3, false);
-    ASSERT_EQ(0, idx);
-    ASSERT_EQ(1, mwdt_task_count(&wdt));
-
-    const mwdt_task_t *t = mwdt_task_at(&wdt, 0);
-    ASSERT_TRUE(t != NULL);
-    ASSERT_STR_EQ("sensor", t->name);
-    ASSERT_EQ(5000, (int)t->deadline_ms);
-    ASSERT_EQ(3, t->max_misses);
-    ASSERT_TRUE(t->enabled);
-    ASSERT_EQ(MWDT_TASK_OK, (int)t->state);
-}
-
-TEST(test_register_multiple) {
-    reset_all();
-    mwdt_register(&wdt, "sensor", 5000, 3, false);
-    mwdt_register(&wdt, "mqtt", 10000, 2, true);
-    mwdt_register(&wdt, "led", 1000, 0, false);
-    ASSERT_EQ(3, mwdt_task_count(&wdt));
-}
-
-TEST(test_register_null) {
-    reset_all();
-    ASSERT_EQ(MWDT_ERR_NULL, mwdt_register(NULL, "x", 1000, 1, false));
-    ASSERT_EQ(MWDT_ERR_NULL, mwdt_register(&wdt, NULL, 1000, 1, false));
-}
-
-TEST(test_register_zero_deadline) {
-    reset_all();
-    ASSERT_EQ(MWDT_ERR_INVALID, mwdt_register(&wdt, "bad", 0, 1, false));
-}
-
-TEST(test_register_full) {
-    reset_all();
-    for (int i = 0; i < MWDT_MAX_TASKS; i++) {
-        ASSERT_GE(mwdt_register(&wdt, "t", 1000, 1, false), 0);
+    if (mwdt_init(&g_fixture.wdt_a, &config_a) != MWDT_OK) {
+        return false;
     }
-    ASSERT_EQ(MWDT_ERR_FULL, mwdt_register(&wdt, "over", 1000, 1, false));
+    if (mwdt_init(&g_fixture.wdt_b, &config_b) != MWDT_OK) {
+        return false;
+    }
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Kick
- * ═══════════════════════════════════════════════════════════════════════════ */
+static bool test_init_and_config_copy(void)
+{
+    mwdt_t zeroed = {0};
+    mwdt_task_t tiny_storage[1];
+    mwdt_config_t invalid = {0};
+    mwdt_config_t config = make_config_a();
+    mwdt_config_t other = make_config_b();
+    const char task_name[] = "solo";
+    size_t index = 0U;
+    mwdt_task_snapshot_t snapshot;
 
-TEST(test_kick) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "task", 5000, 3, false);
+    reset_fixture();
 
-    mock_time += 3000;
-    ASSERT_EQ(MWDT_OK, mwdt_kick(&wdt, (uint8_t)idx));
-    ASSERT_EQ(MWDT_TASK_OK, mwdt_task_state(&wdt, (uint8_t)idx));
+    ASSERT_EQ_INT(MWDT_ERR_NULL, mwdt_init(NULL, &config));
+    ASSERT_EQ_INT(MWDT_ERR_NULL, mwdt_init(&g_fixture.wdt_a, NULL));
+    ASSERT_EQ_INT(MWDT_ERR_INVALID, mwdt_init(&g_fixture.wdt_a, &invalid));
+
+    invalid.tasks = tiny_storage;
+    invalid.task_capacity = 1U;
+    ASSERT_EQ_INT(MWDT_ERR_INVALID, mwdt_init(&g_fixture.wdt_a, &invalid));
+
+    config.task_capacity = 1U;
+    config.tasks = tiny_storage;
+    config.timeout_fn = timeout_cb;
+    config.timeout_ctx = &g_fixture.timeout_log;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+
+    config.clock_ctx = &other.clock_ctx;
+    config.timeout_ctx = NULL;
+
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, task_name, 10U, 1U, false, &index));
+    ASSERT_EQ_SIZE(0U, index);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
+    ASSERT_EQ_U32(1000U, snapshot.last_kick_ms);
+    ASSERT_PTR_EQ(task_name, snapshot.name);
+    ASSERT_EQ_INT(MWDT_ERR_UNINITIALIZED, mwdt_get_task_count(&zeroed, &index));
+    return true;
 }
 
-TEST(test_kick_by_name) {
-    reset_all();
-    mwdt_register(&wdt, "sensor", 5000, 3, false);
+static bool test_capacity_duplicate_and_large_table(void)
+{
+    size_t index = 0U;
+    size_t count = 0U;
+    mwdt_config_t config = make_config_a();
+    char names[260][16];
+    unsigned i;
 
-    mock_time += 3000;
-    ASSERT_EQ(MWDT_OK, mwdt_kick_by_name(&wdt, "sensor"));
+    reset_fixture();
+    config.task_capacity = 260U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "dup", 10U, 1U, false, &index));
+    ASSERT_EQ_INT(MWDT_ERR_INVALID, mwdt_register(&g_fixture.wdt_a, "dup", 10U, 1U, false, &index));
+
+    for (i = 0U; i < 259U; ++i) {
+        (void)snprintf(names[i], sizeof(names[i]), "t%u", i);
+        ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, names[i], 10U, UINT32_MAX, false, &index));
+        ASSERT_EQ_SIZE((size_t)(i + 1U), index);
+    }
+
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_count(&g_fixture.wdt_a, &count));
+    ASSERT_EQ_SIZE(260U, count);
+    ASSERT_EQ_INT(MWDT_ERR_FULL, mwdt_register(&g_fixture.wdt_a, "overflow", 10U, 1U, false, &index));
+    return true;
 }
 
-TEST(test_kick_by_name_not_found) {
-    reset_all();
-    ASSERT_EQ(MWDT_ERR_NOT_FOUND, mwdt_kick_by_name(&wdt, "nonexistent"));
+static bool test_register_validation(void)
+{
+    size_t index = 99U;
+    mwdt_t zeroed = {0};
+    mwdt_config_t config = make_config_a();
+
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_ERR_NULL, mwdt_register(&g_fixture.wdt_a, "x", 10U, 1U, false, NULL));
+    ASSERT_EQ_INT(MWDT_ERR_NULL, mwdt_register(&g_fixture.wdt_a, NULL, 10U, 1U, false, &index));
+    ASSERT_EQ_INT(MWDT_ERR_INVALID, mwdt_register(&g_fixture.wdt_a, "", 10U, 1U, false, &index));
+    ASSERT_EQ_INT(MWDT_ERR_INVALID, mwdt_register(&g_fixture.wdt_a, "x", 0U, 1U, false, &index));
+    ASSERT_EQ_INT(MWDT_ERR_INVALID, mwdt_register(&g_fixture.wdt_a, "x", 10U, 0U, true, &index));
+    ASSERT_EQ_INT(MWDT_ERR_INVALID, mwdt_register(&g_fixture.wdt_a, "x", 10U, 1U, true, &index));
+    ASSERT_EQ_INT(MWDT_ERR_UNINITIALIZED, mwdt_register(&zeroed, "x", 10U, 1U, false, &index));
+    return true;
 }
 
-TEST(test_kick_resets_miss_count) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "task", 1000, 5, false);
+static bool test_time_boundaries_and_wrap(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    mwdt_task_state_t state = MWDT_TASK_DISABLED;
+    uint32_t remaining = 0U;
+    mwdt_config_t config = make_config_a();
 
-    /* Let it miss once */
-    mock_time += 1500;
-    mwdt_check(&wdt);
-    ASSERT_EQ(MWDT_TASK_LATE, mwdt_task_state(&wdt, (uint8_t)idx));
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "edge", 100U, 3U, false, &index));
 
-    /* Kick resets */
-    mwdt_kick(&wdt, (uint8_t)idx);
-    ASSERT_EQ(MWDT_TASK_OK, mwdt_task_state(&wdt, (uint8_t)idx));
-    ASSERT_EQ(0, wdt.tasks[idx].miss_count);
+    g_fixture.clock_a.now_ms = 1099U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_SIZE(0U, timed_out);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_remaining(&g_fixture.wdt_a, index, &remaining));
+    ASSERT_EQ_U32(1U, remaining);
+
+    g_fixture.clock_a.now_ms = 1100U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_SIZE(1U, timed_out);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
+    ASSERT_EQ_INT(MWDT_TASK_LATE, state);
+
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    g_fixture.clock_a.now_ms = UINT32_MAX - 20U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "wrap", 10U, 3U, false, &index));
+    g_fixture.clock_a.now_ms = 24U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
+    ASSERT_EQ_INT(MWDT_TASK_STARVED, state);
+    return true;
 }
 
-TEST(test_kick_null) {
-    ASSERT_EQ(MWDT_ERR_NULL, mwdt_kick(NULL, 0));
-    reset_all();
-    ASSERT_EQ(MWDT_ERR_NOT_FOUND, mwdt_kick(&wdt, 99));
+static bool test_large_miss_counts_and_direct_starve(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    mwdt_task_snapshot_t snapshot;
+    mwdt_config_t config = make_config_a();
+
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "huge", 1U, UINT32_MAX, false, &index));
+
+    g_fixture.clock_a.now_ms = 1255U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
+    ASSERT_EQ_U32(255U, snapshot.miss_count);
+    ASSERT_EQ_INT(MWDT_TASK_LATE, snapshot.state);
+
+    g_fixture.clock_a.now_ms = 1256U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
+    ASSERT_EQ_U32(256U, snapshot.miss_count);
+
+    g_fixture.clock_a.now_ms = UINT32_MAX;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
+    ASSERT_EQ_U32(UINT32_MAX - 1000U, snapshot.miss_count);
+
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "direct", 100U, 2U, false, &index));
+    g_fixture.clock_a.now_ms = 1300U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
+    ASSERT_EQ_INT(MWDT_TASK_STARVED, snapshot.state);
+    ASSERT_EQ_U32(3U, snapshot.miss_count);
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Check — no timeout
- * ═══════════════════════════════════════════════════════════════════════════ */
+static bool test_starved_monotonicity_and_recovery(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    mwdt_task_state_t state = MWDT_TASK_DISABLED;
+    mwdt_config_t config = make_config_a();
 
-TEST(test_check_all_ok) {
-    reset_all();
-    mwdt_register(&wdt, "a", 5000, 3, false);
-    mwdt_register(&wdt, "b", 10000, 3, false);
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "task", 100U, 1U, false, &index));
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
+    ASSERT_EQ_INT(MWDT_TASK_STARVED, state);
 
-    mock_time += 2000;
-    int timed_out = mwdt_check(&wdt);
-    ASSERT_EQ(0, timed_out);
-    ASSERT_TRUE(mwdt_all_ok(&wdt));
-    ASSERT_EQ(0, event_count);
-    ASSERT_EQ(1, (int)mwdt_check_count(&wdt));
+    g_fixture.clock_a.now_ms = 1300U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
+    ASSERT_EQ_INT(MWDT_TASK_STARVED, state);
+
+    ASSERT_EQ_INT(MWDT_OK, mwdt_kick(&g_fixture.wdt_a, index));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
+    ASSERT_EQ_INT(MWDT_TASK_OK, state);
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Check — LATE
- * ═══════════════════════════════════════════════════════════════════════════ */
+static bool test_enable_disable_and_disabled_kick(void)
+{
+    size_t index = 0U;
+    uint32_t remaining = 0U;
+    mwdt_task_state_t state = MWDT_TASK_OK;
+    mwdt_config_t config = make_config_a();
 
-TEST(test_check_late) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "sensor", 2000, 3, false);
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "task", 100U, 2U, false, &index));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_enable(&g_fixture.wdt_a, index, false));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
+    ASSERT_EQ_INT(MWDT_TASK_DISABLED, state);
+    ASSERT_EQ_INT(MWDT_ERR_DISABLED, mwdt_get_remaining(&g_fixture.wdt_a, index, &remaining));
+    ASSERT_EQ_INT(MWDT_ERR_DISABLED, mwdt_kick(&g_fixture.wdt_a, index));
 
-    /* Exceed deadline */
-    mock_time += 2500;
-    int timed_out = mwdt_check(&wdt);
-    ASSERT_EQ(1, timed_out);
-    ASSERT_EQ(MWDT_TASK_LATE, mwdt_task_state(&wdt, (uint8_t)idx));
-    ASSERT_FALSE(mwdt_all_ok(&wdt));
-
-    /* Callback fired */
-    ASSERT_EQ(1, event_count);
-    ASSERT_STR_EQ("sensor", event_log[0].name);
-    ASSERT_EQ(MWDT_TASK_LATE, (int)event_log[0].state);
-    ASSERT_EQ(MWDT_TASK_OK, (int)event_log[0].prev_state);
-    ASSERT_EQ(2000, (int)event_log[0].deadline_ms);
-    ASSERT_EQ(2500, (int)event_log[0].elapsed_ms);
+    g_fixture.clock_a.now_ms = 1500U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_enable(&g_fixture.wdt_a, index, true));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
+    ASSERT_EQ_INT(MWDT_TASK_OK, state);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_remaining(&g_fixture.wdt_a, index, &remaining));
+    ASSERT_EQ_U32(100U, remaining);
+    return true;
 }
 
-TEST(test_check_late_no_duplicate_event) {
-    reset_all();
-    mwdt_register(&wdt, "sensor", 2000, 5, false);
+static bool test_query_contracts(void)
+{
+    size_t count = 0U;
+    bool all_ok = false;
+    uint32_t count_u32 = 0U;
+    mwdt_t zeroed = {0};
+    mwdt_config_t config = make_config_a();
 
-    /* First check — goes LATE */
-    mock_time += 2500;
-    mwdt_check(&wdt);
-    ASSERT_EQ(1, event_count);
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_ERR_NULL, mwdt_check(NULL, &count));
+    ASSERT_EQ_INT(MWDT_ERR_NULL, mwdt_get_all_ok(NULL, &all_ok));
+    ASSERT_EQ_INT(MWDT_ERR_NULL, mwdt_get_check_count(NULL, &count_u32));
+    ASSERT_EQ_INT(MWDT_ERR_UNINITIALIZED, mwdt_get_all_ok(&zeroed, &all_ok));
 
-    /* Second check — still LATE, same miss count → no new event */
-    mock_time += 100;
-    mwdt_check(&wdt);
-    ASSERT_EQ(1, event_count);  /* no duplicate */
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_ERR_NULL, mwdt_get_task_count(&g_fixture.wdt_a, NULL));
+    ASSERT_EQ_INT(MWDT_ERR_NOT_FOUND, mwdt_get_task_state(&g_fixture.wdt_a, 0U, (mwdt_task_state_t *)&count));
+    ASSERT_EQ_INT(MWDT_ERR_NOT_FOUND, mwdt_get_remaining(&g_fixture.wdt_a, 0U, &count_u32));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_all_ok(&g_fixture.wdt_a, &all_ok));
+    ASSERT_TRUE(all_ok);
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Check — STARVED
- * ═══════════════════════════════════════════════════════════════════════════ */
+static bool test_callback_observes_committed_state(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    uint32_t transition_count = 0U;
+    mwdt_config_t config = make_config_a();
 
-TEST(test_check_starved) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "sensor", 1000, 3, false);
-
-    /* Miss 3 deadlines → STARVED */
-    mock_time += 3500;
-    mwdt_check(&wdt);
-
-    ASSERT_EQ(MWDT_TASK_STARVED, mwdt_task_state(&wdt, (uint8_t)idx));
-    ASSERT_EQ(0, reset_count);  /* auto_reset = false */
+    reset_fixture();
+    config.timeout_fn = timeout_cb;
+    config.timeout_ctx = &g_fixture.timeout_log;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "sensor", 100U, 2U, false, &index));
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_SIZE(1U, timed_out);
+    ASSERT_EQ_INT(1, (int)g_fixture.timeout_log.calls);
+    ASSERT_EQ_INT(MWDT_TASK_STARVED, g_fixture.timeout_log.last_event.state);
+    ASSERT_EQ_INT(MWDT_TASK_OK, g_fixture.timeout_log.last_event.prev_state);
+    ASSERT_EQ_U32(2U, g_fixture.timeout_log.last_event.miss_count);
+    ASSERT_EQ_INT(MWDT_TASK_STARVED, g_fixture.timeout_log.queried_state);
+    ASSERT_EQ_U32(2U, g_fixture.timeout_log.queried_miss_count);
+    ASSERT_EQ_U32(1U, g_fixture.timeout_log.queried_transition_count);
+    ASSERT_FALSE(g_fixture.timeout_log.queried_all_ok);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_transition_event_count(&g_fixture.wdt_a, &transition_count));
+    ASSERT_EQ_U32(1U, transition_count);
+    return true;
 }
 
-TEST(test_check_starved_auto_reset) {
-    reset_all();
-    mwdt_register(&wdt, "critical", 1000, 2, true);  /* auto_reset = true */
+static bool test_callback_same_instance_busy(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    size_t count = 0U;
+    mwdt_task_snapshot_t snapshot;
 
-    mock_time += 2500;
-    mwdt_check(&wdt);
+    reset_fixture();
+    ASSERT_TRUE(init_watchdogs_with_callbacks());
+    g_fixture.cb_mode = CB_MODE_BUSY_MUTATIONS;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "busy", 100U, 3U, false, &index));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_count(&g_fixture.wdt_a, &count));
+    ASSERT_EQ_SIZE(1U, count);
 
-    ASSERT_EQ(1, reset_count);  /* reset_fn called */
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_ERR_BUSY, g_fixture.timeout_log.kick_result);
+    ASSERT_EQ_INT(MWDT_ERR_BUSY, g_fixture.timeout_log.disable_result);
+    ASSERT_EQ_INT(MWDT_ERR_BUSY, g_fixture.timeout_log.register_result);
+    ASSERT_EQ_INT(MWDT_ERR_BUSY, g_fixture.timeout_log.reinit_result);
+    ASSERT_EQ_INT(MWDT_ERR_BUSY, g_fixture.timeout_log.nested_check_result);
+    ASSERT_EQ_INT(MWDT_ERR_BUSY, g_fixture.timeout_log.set_timeout_result);
+    ASSERT_EQ_INT(MWDT_ERR_BUSY, g_fixture.timeout_log.set_reset_result);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_count(&g_fixture.wdt_a, &count));
+    ASSERT_EQ_SIZE(1U, count);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
+    ASSERT_EQ_INT(MWDT_TASK_LATE, snapshot.state);
+    ASSERT_EQ_U32(2U, snapshot.miss_count);
+    return true;
 }
 
-TEST(test_check_starved_no_reset_fn) {
-    reset_all();
-    wdt.reset_fn = NULL;  /* no reset function */
-    mwdt_register(&wdt, "task", 1000, 2, true);
+static bool test_callback_other_instance_allowed(void)
+{
+    size_t index_a = 0U;
+    size_t index_b = 0U;
+    size_t timed_out = 0U;
+    mwdt_task_snapshot_t snapshot_b;
 
-    mock_time += 2500;
-    mwdt_check(&wdt);
-    /* Should not crash, just transitions to STARVED */
-    ASSERT_EQ(MWDT_TASK_STARVED, mwdt_task_state(&wdt, 0));
-    ASSERT_EQ(0, reset_count);
+    reset_fixture();
+    ASSERT_TRUE(init_watchdogs_with_callbacks());
+    g_fixture.cb_mode = CB_MODE_OPERATE_OTHER;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "a", 100U, 2U, false, &index_a));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_b, "b", 100U, 2U, false, &index_b));
+    g_fixture.clock_b.now_ms = 2500U;
+
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, g_fixture.timeout_log.other_result);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_b, index_b, &snapshot_b));
+    ASSERT_EQ_U32(2500U, snapshot_b.last_kick_ms);
+    return true;
 }
 
-TEST(test_late_to_starved_transition) {
-    reset_all();
-    mwdt_register(&wdt, "task", 1000, 3, false);
+static bool test_reset_latch_and_repeat_checks(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    bool reset_requested = false;
+    size_t reset_index = 0U;
+    mwdt_config_t config = make_config_a();
 
-    /* 1 miss → LATE */
-    mock_time += 1500;
-    mwdt_check(&wdt);
-    ASSERT_EQ(1, event_count);
-    ASSERT_EQ(MWDT_TASK_LATE, (int)event_log[0].state);
+    reset_fixture();
+    config.timeout_fn = timeout_cb;
+    config.timeout_ctx = &g_fixture.timeout_log;
+    config.reset_fn = reset_cb;
+    config.reset_ctx = &g_fixture.reset_log;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "critical", 100U, 1U, true, &index));
 
-    /* 3 misses → STARVED */
-    mock_time = 1000 + 3500;
-    mwdt_check(&wdt);
-    ASSERT_EQ(2, event_count);
-    ASSERT_EQ(MWDT_TASK_STARVED, (int)event_log[1].state);
-    ASSERT_EQ(MWDT_TASK_LATE, (int)event_log[1].prev_state);
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(1, (int)g_fixture.reset_log.calls);
+    ASSERT_EQ_INT(MWDT_ERR_BUSY, g_fixture.reset_log.mutation_result);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_reset_is_requested(&g_fixture.wdt_a, &reset_requested));
+    ASSERT_TRUE(reset_requested);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_reset_trigger_task(&g_fixture.wdt_a, &reset_index));
+    ASSERT_EQ_SIZE(index, reset_index);
+    ASSERT_EQ_INT(MWDT_ERR_RESET_LATCHED, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_ERR_RESET_LATCHED, mwdt_kick(&g_fixture.wdt_a, index));
+    ASSERT_EQ_INT(1, (int)g_fixture.reset_log.calls);
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: max_misses = 0 (warn only, never starve)
- * ═══════════════════════════════════════════════════════════════════════════ */
+static bool test_two_starved_auto_reset_tasks_only_one_reset(void)
+{
+    size_t first = 0U;
+    size_t second = 0U;
+    size_t timed_out = 0U;
+    mwdt_task_state_t state = MWDT_TASK_OK;
+    mwdt_config_t config = make_config_a();
 
-TEST(test_max_misses_zero_never_starves) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "non_critical", 1000, 0, false);
-
-    /* Miss 100 deadlines */
-    mock_time += 100500;
-    mwdt_check(&wdt);
-
-    /* Should be LATE, never STARVED */
-    ASSERT_EQ(MWDT_TASK_LATE, mwdt_task_state(&wdt, (uint8_t)idx));
+    reset_fixture();
+    config.reset_fn = reset_cb;
+    config.reset_ctx = &g_fixture.reset_log;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "first", 100U, 1U, true, &first));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "second", 100U, 1U, true, &second));
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(1, (int)g_fixture.reset_log.calls);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, second, &state));
+    ASSERT_EQ_INT(MWDT_TASK_OK, state);
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Enable / Disable
- * ═══════════════════════════════════════════════════════════════════════════ */
+static bool test_clear_reset_latch_policy(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    bool reset_requested = true;
+    mwdt_config_t config = make_config_a();
 
-TEST(test_disable_skip) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "task", 1000, 3, false);
-    mwdt_enable(&wdt, (uint8_t)idx, false);
-
-    mock_time += 5000;
-    mwdt_check(&wdt);
-    ASSERT_EQ(0, event_count);
-    ASSERT_TRUE(mwdt_all_ok(&wdt));
+    reset_fixture();
+    config.reset_fn = reset_cb;
+    config.reset_ctx = &g_fixture.reset_log;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "critical", 100U, 1U, true, &index));
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_ERR_STATE, mwdt_clear_reset_request(&g_fixture.wdt_a));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_enable(&g_fixture.wdt_a, index, false));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_clear_reset_request(&g_fixture.wdt_a));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_reset_is_requested(&g_fixture.wdt_a, &reset_requested));
+    ASSERT_FALSE(reset_requested);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_enable(&g_fixture.wdt_a, index, true));
+    return true;
 }
 
-TEST(test_reenable_resets) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "task", 1000, 3, false);
+static bool test_no_timeout_callback_still_updates(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    uint32_t transition_count = 0U;
+    mwdt_task_state_t state = MWDT_TASK_OK;
+    mwdt_config_t config = make_config_a();
 
-    /* Make it late */
-    mock_time += 1500;
-    mwdt_check(&wdt);
-    ASSERT_EQ(MWDT_TASK_LATE, mwdt_task_state(&wdt, (uint8_t)idx));
-
-    /* Disable + re-enable resets state */
-    mwdt_enable(&wdt, (uint8_t)idx, false);
-    mwdt_enable(&wdt, (uint8_t)idx, true);
-    ASSERT_EQ(MWDT_TASK_OK, mwdt_task_state(&wdt, (uint8_t)idx));
-    ASSERT_EQ(0, wdt.tasks[idx].miss_count);
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "quiet", 100U, 2U, false, &index));
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
+    ASSERT_EQ_INT(MWDT_TASK_STARVED, state);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_transition_event_count(&g_fixture.wdt_a, &transition_count));
+    ASSERT_EQ_U32(1U, transition_count);
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Recovery via kick
- * ═══════════════════════════════════════════════════════════════════════════ */
+static bool test_counters_saturate(void)
+{
+    size_t index = 0U;
+    size_t timed_out = 0U;
+    uint32_t check_count = 0U;
+    uint32_t transition_count = 0U;
+    uint32_t reset_count = 0U;
+    mwdt_config_t config = make_config_a();
 
-TEST(test_recovery) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "task", 2000, 3, false);
-
-    /* Go LATE */
-    mock_time += 2500;
-    mwdt_check(&wdt);
-    ASSERT_EQ(MWDT_TASK_LATE, mwdt_task_state(&wdt, (uint8_t)idx));
-
-    /* Kick → back to OK */
-    mwdt_kick(&wdt, (uint8_t)idx);
-    ASSERT_EQ(MWDT_TASK_OK, mwdt_task_state(&wdt, (uint8_t)idx));
-    ASSERT_TRUE(mwdt_all_ok(&wdt));
+    reset_fixture();
+    config.reset_fn = reset_cb;
+    config.reset_ctx = &g_fixture.reset_log;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "critical", 100U, 1U, true, &index));
+    g_fixture.wdt_a.check_count = UINT32_MAX - 1U;
+    g_fixture.wdt_a.transition_event_count = UINT32_MAX - 1U;
+    g_fixture.wdt_a.reset_request_count = UINT32_MAX - 1U;
+    g_fixture.clock_a.now_ms = 1200U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_check_count(&g_fixture.wdt_a, &check_count));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_transition_event_count(&g_fixture.wdt_a, &transition_count));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_reset_request_count(&g_fixture.wdt_a, &reset_count));
+    ASSERT_EQ_U32(UINT32_MAX, check_count);
+    ASSERT_EQ_U32(UINT32_MAX, transition_count);
+    ASSERT_EQ_U32(UINT32_MAX, reset_count);
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Remaining
- * ═══════════════════════════════════════════════════════════════════════════ */
+static bool test_two_instances_and_context_separation(void)
+{
+    size_t index_a = 0U;
+    size_t index_b = 0U;
+    size_t timed_out = 0U;
+    mwdt_task_state_t state_a = MWDT_TASK_OK;
+    mwdt_task_state_t state_b = MWDT_TASK_OK;
+    mwdt_config_t config_a = make_config_a();
+    mwdt_config_t config_b = make_config_b();
 
-TEST(test_remaining) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "task", 5000, 3, false);
-
-    mock_time += 2000;
-    uint32_t rem = mwdt_remaining(&wdt, (uint8_t)idx);
-    ASSERT_EQ(3000, (int)rem);
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config_a));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_b, &config_b));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "a", 100U, 2U, false, &index_a));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_b, "b", 100U, 2U, false, &index_b));
+    g_fixture.clock_a.now_ms = 1200U;
+    g_fixture.clock_b.now_ms = 2050U;
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_b, &timed_out));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index_a, &state_a));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_b, index_b, &state_b));
+    ASSERT_EQ_INT(MWDT_TASK_STARVED, state_a);
+    ASSERT_EQ_INT(MWDT_TASK_OK, state_b);
+    ASSERT_TRUE(g_fixture.clock_a.calls > 0U);
+    ASSERT_TRUE(g_fixture.clock_b.calls > 0U);
+    return true;
 }
 
-TEST(test_remaining_expired) {
-    reset_all();
-    int idx = mwdt_register(&wdt, "task", 2000, 3, false);
+static bool test_name_borrowing_and_find(void)
+{
+    char task_name[] = "borrowed";
+    size_t index = 0U;
+    size_t found = 0U;
+    mwdt_task_snapshot_t snapshot;
+    mwdt_config_t config = make_config_a();
 
-    mock_time += 3000;
-    ASSERT_EQ(0, (int)mwdt_remaining(&wdt, (uint8_t)idx));
+    reset_fixture();
+    ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, task_name, 100U, 2U, false, &index));
+    ASSERT_EQ_INT(MWDT_OK, mwdt_find(&g_fixture.wdt_a, "borrowed", &found));
+    ASSERT_EQ_SIZE(index, found);
+    ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
+    ASSERT_PTR_EQ(task_name, snapshot.name);
+    return true;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Find
- * ═══════════════════════════════════════════════════════════════════════════ */
+typedef bool (*test_fn_t)(void);
 
-TEST(test_find) {
-    reset_all();
-    mwdt_register(&wdt, "alpha", 1000, 1, false);
-    mwdt_register(&wdt, "beta", 2000, 1, false);
-    mwdt_register(&wdt, "gamma", 3000, 1, false);
+static void run_test(const char *name, test_fn_t fn)
+{
+    bool passed;
 
-    ASSERT_EQ(0, mwdt_find(&wdt, "alpha"));
-    ASSERT_EQ(1, mwdt_find(&wdt, "beta"));
-    ASSERT_EQ(2, mwdt_find(&wdt, "gamma"));
-    ASSERT_EQ(-1, mwdt_find(&wdt, "delta"));
+    g_tests_run++;
+    printf("  %-46s ", name);
+    passed = fn();
+    if (passed) {
+        g_tests_passed++;
+        printf("PASS\n");
+    } else {
+        g_tests_failed++;
+    }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Multiple tasks
- * ═══════════════════════════════════════════════════════════════════════════ */
+int main(void)
+{
+    printf("microwdt runtime tests\n\n");
 
-TEST(test_multiple_tasks_mixed) {
-    reset_all();
-    int fast = mwdt_register(&wdt, "fast", 1000, 3, false);
-    int slow = mwdt_register(&wdt, "slow", 10000, 3, false);
+    run_test("test_init_and_config_copy", test_init_and_config_copy);
+    run_test("test_capacity_duplicate_and_large_table", test_capacity_duplicate_and_large_table);
+    run_test("test_register_validation", test_register_validation);
+    run_test("test_time_boundaries_and_wrap", test_time_boundaries_and_wrap);
+    run_test("test_large_miss_counts_and_direct_starve", test_large_miss_counts_and_direct_starve);
+    run_test("test_starved_monotonicity_and_recovery", test_starved_monotonicity_and_recovery);
+    run_test("test_enable_disable_and_disabled_kick", test_enable_disable_and_disabled_kick);
+    run_test("test_query_contracts", test_query_contracts);
+    run_test("test_callback_observes_committed_state", test_callback_observes_committed_state);
+    run_test("test_callback_same_instance_busy", test_callback_same_instance_busy);
+    run_test("test_callback_other_instance_allowed", test_callback_other_instance_allowed);
+    run_test("test_reset_latch_and_repeat_checks", test_reset_latch_and_repeat_checks);
+    run_test("test_two_starved_auto_reset_tasks_only_one_reset", test_two_starved_auto_reset_tasks_only_one_reset);
+    run_test("test_clear_reset_latch_policy", test_clear_reset_latch_policy);
+    run_test("test_no_timeout_callback_still_updates", test_no_timeout_callback_still_updates);
+    run_test("test_counters_saturate", test_counters_saturate);
+    run_test("test_two_instances_and_context_separation", test_two_instances_and_context_separation);
+    run_test("test_name_borrowing_and_find", test_name_borrowing_and_find);
 
-    /* Fast misses, slow still ok */
-    mock_time += 1500;
-    mwdt_check(&wdt);
+    printf("\nresults: %u/%u passed, %u failed, %u assertions\n",
+        g_tests_passed,
+        g_tests_run,
+        g_tests_failed,
+        g_assertions);
 
-    ASSERT_EQ(MWDT_TASK_LATE, mwdt_task_state(&wdt, (uint8_t)fast));
-    ASSERT_EQ(MWDT_TASK_OK, mwdt_task_state(&wdt, (uint8_t)slow));
-    ASSERT_FALSE(mwdt_all_ok(&wdt));
-    ASSERT_EQ(1, event_count);
-    ASSERT_STR_EQ("fast", event_log[0].name);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Full scenario
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-TEST(test_full_scenario) {
-    reset_all();
-
-    int sensor = mwdt_register(&wdt, "sensor_task", 2000, 3, false);
-    int mqtt   = mwdt_register(&wdt, "mqtt_task",   5000, 2, true);
-
-    /* T+1s: all ok */
-    mock_time += 1000;
-    mwdt_check(&wdt);
-    ASSERT_TRUE(mwdt_all_ok(&wdt));
-
-    /* T+1.5s: kick sensor */
-    mock_time += 500;
-    mwdt_kick(&wdt, (uint8_t)sensor);
-
-    /* T+3s: sensor ok (kicked at 2.5s, deadline 2s → next at 4.5s) */
-    mock_time += 1000;
-    mwdt_check(&wdt);
-    ASSERT_EQ(MWDT_TASK_OK, mwdt_task_state(&wdt, (uint8_t)sensor));
-    ASSERT_EQ(MWDT_TASK_OK, mwdt_task_state(&wdt, (uint8_t)mqtt));
-
-    /* T+7s: mqtt goes LATE (registered at 1s, deadline 5s, no kick) */
-    mock_time = 1000 + 6500;
-    mwdt_check(&wdt);
-    ASSERT_EQ(MWDT_TASK_LATE, mwdt_task_state(&wdt, (uint8_t)mqtt));
-
-    /* T+12s: mqtt STARVED (2 misses, auto_reset) */
-    mock_time = 1000 + 11500;
-    mwdt_check(&wdt);
-    ASSERT_EQ(MWDT_TASK_STARVED, mwdt_task_state(&wdt, (uint8_t)mqtt));
-    ASSERT_EQ(1, reset_count);  /* reset triggered */
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Tests: Edge cases and strings
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-TEST(test_check_null) {
-    ASSERT_EQ(0, mwdt_check(NULL));
-}
-
-TEST(test_query_null) {
-    ASSERT_EQ(0, mwdt_task_count(NULL));
-    ASSERT_TRUE(mwdt_task_at(NULL, 0) == NULL);
-    ASSERT_EQ(-1, mwdt_find(NULL, "x"));
-    ASSERT_EQ(MWDT_TASK_DISABLED, (int)mwdt_task_state(NULL, 0));
-    ASSERT_TRUE(mwdt_all_ok(NULL));
-    ASSERT_EQ(0, (int)mwdt_remaining(NULL, 0));
-    ASSERT_EQ(0, (int)mwdt_timeout_count(NULL));
-    ASSERT_EQ(0, (int)mwdt_check_count(NULL));
-}
-
-TEST(test_err_str) {
-    ASSERT_STR_EQ("ok",              mwdt_err_str(MWDT_OK));
-    ASSERT_STR_EQ("null pointer",    mwdt_err_str(MWDT_ERR_NULL));
-    ASSERT_STR_EQ("task table full", mwdt_err_str(MWDT_ERR_FULL));
-    ASSERT_STR_EQ("task not found",  mwdt_err_str(MWDT_ERR_NOT_FOUND));
-    ASSERT_STR_EQ("unknown error",   mwdt_err_str((mwdt_err_t)99));
-}
-
-TEST(test_state_str) {
-    ASSERT_STR_EQ("OK",       mwdt_task_state_str(MWDT_TASK_OK));
-    ASSERT_STR_EQ("LATE",     mwdt_task_state_str(MWDT_TASK_LATE));
-    ASSERT_STR_EQ("STARVED",  mwdt_task_state_str(MWDT_TASK_STARVED));
-    ASSERT_STR_EQ("DISABLED", mwdt_task_state_str(MWDT_TASK_DISABLED));
-}
-
-TEST(test_no_timeout_callback) {
-    reset_all();
-    wdt.timeout_fn = NULL;
-    mwdt_register(&wdt, "task", 1000, 3, false);
-
-    mock_time += 1500;
-    mwdt_check(&wdt);
-    /* Should not crash, state still updates */
-    ASSERT_EQ(MWDT_TASK_LATE, mwdt_task_state(&wdt, 0));
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Main
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-int main(void) {
-    printf("\n=== microwdt test suite ===\n\n");
-
-    printf("[Init]\n");
-    RUN_TEST(test_init);
-    RUN_TEST(test_init_null);
-
-    printf("\n[Registration]\n");
-    RUN_TEST(test_register);
-    RUN_TEST(test_register_multiple);
-    RUN_TEST(test_register_null);
-    RUN_TEST(test_register_zero_deadline);
-    RUN_TEST(test_register_full);
-
-    printf("\n[Kick]\n");
-    RUN_TEST(test_kick);
-    RUN_TEST(test_kick_by_name);
-    RUN_TEST(test_kick_by_name_not_found);
-    RUN_TEST(test_kick_resets_miss_count);
-    RUN_TEST(test_kick_null);
-
-    printf("\n[Check - Healthy]\n");
-    RUN_TEST(test_check_all_ok);
-
-    printf("\n[Check - LATE]\n");
-    RUN_TEST(test_check_late);
-    RUN_TEST(test_check_late_no_duplicate_event);
-
-    printf("\n[Check - STARVED]\n");
-    RUN_TEST(test_check_starved);
-    RUN_TEST(test_check_starved_auto_reset);
-    RUN_TEST(test_check_starved_no_reset_fn);
-    RUN_TEST(test_late_to_starved_transition);
-
-    printf("\n[Max Misses Zero]\n");
-    RUN_TEST(test_max_misses_zero_never_starves);
-
-    printf("\n[Enable/Disable]\n");
-    RUN_TEST(test_disable_skip);
-    RUN_TEST(test_reenable_resets);
-
-    printf("\n[Recovery]\n");
-    RUN_TEST(test_recovery);
-
-    printf("\n[Remaining]\n");
-    RUN_TEST(test_remaining);
-    RUN_TEST(test_remaining_expired);
-
-    printf("\n[Find]\n");
-    RUN_TEST(test_find);
-
-    printf("\n[Multiple Tasks]\n");
-    RUN_TEST(test_multiple_tasks_mixed);
-
-    printf("\n[Full Scenario]\n");
-    RUN_TEST(test_full_scenario);
-
-    printf("\n[Edge Cases]\n");
-    RUN_TEST(test_check_null);
-    RUN_TEST(test_query_null);
-    RUN_TEST(test_err_str);
-    RUN_TEST(test_state_str);
-    RUN_TEST(test_no_timeout_callback);
-
-    printf("\n=== Results: %d/%d passed", tests_passed, tests_run);
-    if (tests_failed > 0) printf(", %d FAILED", tests_failed);
-    printf(" ===\n\n");
-
-    return tests_failed > 0 ? 1 : 0;
+    return g_tests_failed == 0U ? 0 : 1;
 }

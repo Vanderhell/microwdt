@@ -1,15 +1,20 @@
-CC      ?= gcc
-CFLAGS  := -std=c99 -Wall -Wextra -Wpedantic -Werror -I../include
-SRC     := ../src/mwdt.c
-TESTS   := test_all.c
+CC ?= cc
+CPPFLAGS += -I../include
+CFLAGS += -std=c99 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wformat=2 -Werror
+LDFLAGS +=
+LDLIBS +=
+
+SRC = ../src/mwdt.c
+TEST_SRC = test_all.c
+TARGET = test_all
 
 .PHONY: all clean
 
-all: test_all
-	@./test_all
+all: $(TARGET)
+	./$(TARGET)
 
-test_all: $(TESTS) $(SRC) ../include/mwdt.h
-	$(CC) $(CFLAGS) $(SRC) $(TESTS) -o $@
+$(TARGET): $(SRC) $(TEST_SRC) ../include/mwdt.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SRC) $(TEST_SRC) $(LDFLAGS) $(LDLIBS) -o $@
 
 clean:
-	rm -f test_all
+	rm -f $(TARGET) $(TARGET).exe test_all.out

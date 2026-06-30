@@ -1,27 +1,41 @@
-# Design Rationale
+# Design Notes
 
-## 1. Per-task instead of global watchdog
-Hardware watchdogs detect total system freeze. microwdt detects per-task stalls — you know WHICH task hung, not just THAT something hung.
+## Caller-owned storage
 
-## 2. Three-state model (OK → LATE → STARVED)
-LATE = missed one deadline (warning). STARVED = missed max_misses (critical). This gives gradual escalation — log a warning first, reset only if it doesn't recover.
+`microwdt` keeps the public watchdog size stable by requiring the caller to provide task storage. That removes any public ABI dependence on configuration macros and lets different translation units agree on the same `mwdt_t` layout.
 
-## 3. Kick-based (not timer-callback based)
-Tasks report liveness by calling mwdt_kick(). This is simpler and more natural than registering timer callbacks. The task knows when it completed meaningful work.
+## State transitions
 
-## 4. Edge-triggered callbacks
-Like microhealth: fires only on state transitions. A task stuck at LATE for 100 checks = 1 event, not 100.
+The library tracks four states:
 
-## 5. max_misses = 0 for warn-only
-Non-critical tasks (display, LED) can miss deadlines without triggering a reset. Set max_misses=0 and they stay LATE forever without escalating to STARVED.
+- `OK`
+- `LATE`
+- `STARVED`
+- `DISABLED`
 
-## 6. auto_reset is per-task
-A sensor task stalling might just need a warning. An MQTT task stalling might need a full system reset. The decision is per-task, not global.
+Checks do not force a gradual `OK -> LATE -> STARVED` sequence. If enough deadline periods elapsed before the next check, a task can go directly to `STARVED`.
 
-| Decision | Gains | Costs |
-|----------|-------|-------|
-| Per-task | Know which task stalled | One kick call per task per cycle |
-| Three states | Gradual escalation | Slightly more complex than bool |
-| Kick-based | Natural for task loops | Task must remember to kick |
-| Edge-triggered | No spam | Misses sub-check oscillations |
-| Per-task auto_reset | Granular control | One more config per task |
+## Miss-count semantics
+
+The implementation uses modulo-32-bit unsigned time arithmetic. A check computes elapsed periods from the last successful kick and never narrows the result to 8-bit storage. Miss counts remain monotonic until explicit recovery.
+
+## Callback ordering
+
+Timeout callbacks run after the new state and miss count are committed. Query APIs inside the callback therefore observe the same state that the callback event reports.
+
+Reset callbacks are request notifications, not proofs of a completed reset. If the callback returns, the watchdog remains latched until the application reinitializes it or explicitly clears the reset request after all auto-reset tasks are recovered or disabled.
+
+## Concurrency boundary
+
+`microwdt` does not add mutexes, atomics, RTOS wrappers, or ISR abstractions. One watchdog instance expects one serialized owner. Different instances are independent only if their storage, callbacks, and context objects are also independent.
+
+## Software-watchdog limits
+
+This library can detect missed deadlines only when the code that owns the watchdog continues to run checks. It cannot detect:
+
+- failure of the code responsible for calling `mwdt_check`
+- full scheduler lockup
+- interrupts disabled long enough to prevent checks
+- CPU lockup
+
+For whole-system liveness, pair it with an independent hardware watchdog outside this library.
