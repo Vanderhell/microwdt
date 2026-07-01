@@ -24,3 +24,4 @@
 
 - Removed unsupported release-version claims that were not backed by repository tags.
 - Updated README and API documentation to describe ownership, lifetime, callback ordering, thread/ISR limits, and software-watchdog blind spots precisely.
+- Clarified that no repository tag currently proves a `1.0.0` release, and that public struct field stability does not make direct state mutation supported.

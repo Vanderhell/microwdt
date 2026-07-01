@@ -14,6 +14,8 @@ It tracks caller-owned tasks, samples a caller-owned monotonic 32-bit millisecon
 - No heap allocation.
 - No OS, RTOS, filesystem, scheduler, logging, or hardware watchdog dependency.
 - No thread-safety or ISR-safety guarantee for one `mwdt_t`.
+- All watchdog and task state lives in volatile process RAM owned by the application.
+- Public structure fields have stable presence across translation units, but direct mutation of `mwdt_t` and `mwdt_task_t` fields outside the API is unsupported.
 
 ## State model
 
@@ -53,8 +55,9 @@ static void app_timeout(const mwdt_timeout_t *event, void *ctx)
 static void app_reset(const mwdt_timeout_t *event, void *ctx)
 {
     app_ctx_t *app = (app_ctx_t *)ctx;
-    (void)event;
-    app->reset_requested = true;
+    if (event->state == MWDT_TASK_STARVED) {
+        app->reset_requested = true;
+    }
 }
 
 int main(void)
@@ -100,8 +103,12 @@ int main(void)
     if (mwdt_reset_is_requested(&watchdog, &reset_latched) != MWDT_OK) {
         return 7;
     }
+    if (reset_latched) {
+        /* Request platform-specific recovery from the serialized owner context. */
+        return 8;
+    }
 
-    return (timed_out == 0U && !reset_latched) ? 0 : 8;
+    return timed_out == 0U ? 0 : 9;
 }
 ```
 
@@ -125,11 +132,13 @@ ctest --test-dir build --output-on-failure
 ## Runtime model and limits
 
 - One application-owned control loop should own each `mwdt_t`.
+- Detection latency depends on how often that owner calls `mwdt_check`.
 - Access to one watchdog from multiple threads, tasks, or ISRs requires external serialization or message passing.
 - A C data race on the same watchdog object is undefined behavior.
 - `mwdt_check` samples the clock once per check. `mwdt_kick`, re-enable, and registration sample it once per operation.
 - The clock must be monotonic modulo 32 bits. Backward jumps outside wraparound semantics are unsupported.
 - Timeout and reset callbacks are synchronous. Errors from those callbacks do not propagate through the API.
+- Timeout and reset callback contexts are borrowed caller-owned pointers.
 - A returned reset callback means a reset was requested, not that the platform actually reset.
 - The library cannot detect failure of the code that is responsible for calling `mwdt_check`.
 - Full scheduler lockup, disabled interrupts preventing checks, and CPU lockup are outside the reach of a software watchdog. Use an independent hardware watchdog for whole-system liveness.

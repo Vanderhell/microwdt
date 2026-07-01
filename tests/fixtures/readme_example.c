@@ -24,8 +24,9 @@ static void app_timeout(const mwdt_timeout_t *event, void *ctx)
 static void app_reset(const mwdt_timeout_t *event, void *ctx)
 {
     app_ctx_t *app = (app_ctx_t *)ctx;
-    (void)event;
-    app->reset_requested = 1;
+    if (event->state == MWDT_TASK_STARVED) {
+        app->reset_requested = 1;
+    }
 }
 
 int main(void)
@@ -69,5 +70,8 @@ int main(void)
     if (mwdt_reset_is_requested(&watchdog, &reset_latched) != MWDT_OK) {
         return 7;
     }
-    return (timed_out == 0U && !reset_latched) ? 0 : 8;
+    if (reset_latched) {
+        return 8;
+    }
+    return timed_out == 0U ? 0 : 9;
 }

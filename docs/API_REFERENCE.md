@@ -10,6 +10,8 @@ Header:
 
 - `mwdt_t` is caller-allocated storage for one watchdog instance.
 - `mwdt_task_t` storage is caller-owned and provided through `mwdt_config_t.tasks`.
+- Public field presence is stable across translation units, but direct mutation of `mwdt_t` and `mwdt_task_t` fields outside the documented API is unsupported.
+- All library state is ordinary process RAM in caller-owned objects. Reboot, power loss, faults, or process exit discard it.
 - `mwdt_init` copies callback function pointers and callback context pointers by value into the watchdog instance.
 - The task storage array must outlive every use of the watchdog instance until the next successful `mwdt_init`.
 - Task names are borrowed `const char *` pointers. They must remain valid and immutable until reinitialization.
@@ -72,6 +74,7 @@ mwdt_err_t mwdt_check(mwdt_t *wdt, size_t *out_timed_out);
 
 - Samples the clock once per call.
 - `out_timed_out` receives the number of currently enabled tasks whose elapsed time is at least their deadline.
+- Detection latency is bounded by the application's `mwdt_check` cadence, not just by each task deadline.
 - For each transition to `LATE` or `STARVED`, the library:
   1. Computes candidate state and miss count.
   2. Commits the task state and miss count.
@@ -82,6 +85,7 @@ mwdt_err_t mwdt_check(mwdt_t *wdt, size_t *out_timed_out);
 - Event fields are copied values except `name`, which is the borrowed task-name pointer.
 - Query APIs called during the callback observe the already-committed state and counters.
 - The library performs no further mutation of that task after the timeout callback returns.
+- Return values from timeout and reset callbacks are not modeled by the API; callback-side failures do not propagate through library calls.
 
 ## Reentrancy and busy state
 
@@ -143,6 +147,7 @@ mwdt_err_t mwdt_check(mwdt_t *wdt, size_t *out_timed_out);
 - The preferred model is one owner task or main loop that performs checks and serialized mutations.
 - The library is not ISR-safe by default.
 - Calling `mwdt_check` from a timer ISR is unsupported unless the platform independently proves the callback, clock, and access model are ISR-safe.
+- Kicking tasks from arbitrary task contexts without synchronization is unsupported on a shared watchdog instance.
 - The library does not own cleanup. `return`, `goto`, `break`, `continue`, `abort`, `_Exit`, faults, brownout, watchdog reset, or power loss trigger no automatic library cleanup.
 - Callback errors do not propagate through the API.
 - `longjmp` and C++ exceptions escaping through callbacks are unsupported.

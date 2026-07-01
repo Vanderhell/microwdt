@@ -3,6 +3,7 @@
 ## Caller-owned storage
 
 `microwdt` keeps the public watchdog size stable by requiring the caller to provide task storage. That removes any public ABI dependence on configuration macros and lets different translation units agree on the same `mwdt_t` layout.
+The stable public field set exists for ABI consistency, not to invite direct field writes. Applications should treat `mwdt_t` and `mwdt_task_t` as API-owned state once initialized or registered.
 
 ## State transitions
 
@@ -39,3 +40,4 @@ This library can detect missed deadlines only when the code that owns the watchd
 - CPU lockup
 
 For whole-system liveness, pair it with an independent hardware watchdog outside this library.
+Detection latency also depends on the owner's check cadence, so a slow polling loop can delay both `LATE` and `STARVED` observation.

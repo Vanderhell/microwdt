@@ -13,6 +13,7 @@ uint32_t clock_fn(void *ctx);
 4. Register tasks and retain their returned indexes.
 5. Kick tasks when they complete useful work.
 6. Run `mwdt_check` from one serialized owner context.
+7. Treat a returning reset callback as a reset request notification only; platform reset completion remains the caller's job.
 
 ## CMake integration
 
@@ -34,6 +35,7 @@ target_compile_features(microwdt PUBLIC c_std_99)
 ## Platform responsibilities
 
 - Provide a clock source with wraparound-compatible monotonic semantics.
+- Choose a check cadence that is fast enough for the required detection latency.
 - Serialize access if multiple tasks or threads can touch the same watchdog instance.
 - Decide what the timeout callback should do with `LATE` and `STARVED` events.
 - Decide what the reset callback should do when an auto-reset task starves.
@@ -45,3 +47,4 @@ target_compile_features(microwdt PUBLIC c_std_99)
 - No implicit ISR safety
 - No automatic cleanup or resource rollback
 - No built-in hardware reset implementation
+- No supported direct mutation of public watchdog or task fields after initialization
