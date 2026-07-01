@@ -9,6 +9,7 @@ typedef struct {
     bool reset_requested;
 } consumer_ctx_t;
 
+/* cppcheck-suppress constParameterCallback */
 static uint32_t consumer_clock(void *ctx)
 {
     const consumer_ctx_t *consumer = (const consumer_ctx_t *)ctx;

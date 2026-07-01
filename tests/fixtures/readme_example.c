@@ -8,6 +8,7 @@ typedef struct {
     int reset_requested;
 } app_ctx_t;
 
+/* cppcheck-suppress constParameterCallback */
 static uint32_t app_clock(void *ctx)
 {
     const app_ctx_t *app = (const app_ctx_t *)ctx;

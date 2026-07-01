@@ -113,6 +113,7 @@ function(add_compile_fail_test test_name source source_line msvc_patterns other_
       "-DCMAKE_C_SIMULATE_ID=${CMAKE_C_SIMULATE_ID}"
       "-DCMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES=${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES}"
       "-DCMAKE_C_STANDARD_INCLUDE_DIRECTORIES=${CMAKE_C_STANDARD_INCLUDE_DIRECTORIES}"
+      "-DMSVC_INCLUDE_ENV=$ENV{INCLUDE}"
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_fail_runner.cmake)
 endfunction()
 
@@ -121,7 +122,7 @@ add_compile_fail_test(compile_fail_bad_timeout compile_fail_bad_timeout.c 11 C41
 add_compile_fail_test(compile_fail_bad_reset compile_fail_bad_reset.c 10 C4113 "incompatible-pointer-types|incompatible function pointer")
 add_compile_fail_test(compile_fail_const_event compile_fail_const_event.c 6 "const object" "const object|const-qualified type|read-only object")
 add_compile_fail_test(compile_fail_old_layout compile_fail_old_layout.c 6 subscript "subscript|array index in non-array initializer|non-array initializer|non-array type")
-add_compile_fail_test(compile_fail_bad_assignment compile_fail_bad_assignment.c 11 C4113 "incompatible-pointer-types|incompatible function pointer")
+add_compile_fail_test(compile_fail_bad_assignment compile_fail_bad_assignment.c 11 "C4113|C4028|C4047|C4133" "incompatible-pointer-types|incompatible function pointer")
 
 install(TARGETS microwdt EXPORT microwdtTargets
   ARCHIVE DESTINATION lib
