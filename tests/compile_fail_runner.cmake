@@ -12,33 +12,78 @@ endif()
 
 set(include_dir "${CMAKE_CURRENT_LIST_DIR}/../include")
 set(source_path "${CMAKE_CURRENT_LIST_DIR}/fixtures/${SOURCE}")
-set(object_path "${CMAKE_CURRENT_BINARY_DIR}/${SOURCE}.obj")
+set(project_dir "${CMAKE_CURRENT_BINARY_DIR}/${SOURCE}.cmake")
+set(build_dir "${project_dir}/build")
+set(project_file "${project_dir}/CMakeLists.txt")
 
+set(is_msvc FALSE)
 if(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
-  set(msvc_include_args "/I${include_dir}")
-  foreach(dir IN LISTS CMAKE_C_STANDARD_INCLUDE_DIRECTORIES CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES)
-    if(NOT dir STREQUAL "")
-      list(APPEND msvc_include_args "/I${dir}")
-    endif()
-  endforeach()
-  if(DEFINED MSVC_INCLUDE_ENV AND NOT MSVC_INCLUDE_ENV STREQUAL "")
-    set(cmd ${CMAKE_COMMAND} -E env "INCLUDE=${MSVC_INCLUDE_ENV}" "${CMAKE_C_COMPILER}" /nologo /W4 /WX /std:c11 ${msvc_include_args} /c "${source_path}" "/Fo${object_path}")
-  else()
-    set(cmd "${CMAKE_C_COMPILER}" /nologo /W4 /WX /std:c11 ${msvc_include_args} /c "${source_path}" "/Fo${object_path}")
-  endif()
+  set(is_msvc TRUE)
+endif()
+
+file(MAKE_DIRECTORY "${project_dir}")
+
+if(is_msvc)
+  set(target_compile_options_block "target_compile_options(compile_fail_target PRIVATE /W4 /WX /permissive- /Zc:preprocessor)\n")
 else()
-  set(cmd "${CMAKE_C_COMPILER}" -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wformat=2 -Werror "-I${include_dir}" -c "${source_path}" -o "${object_path}")
+  set(target_compile_options_block "target_compile_options(compile_fail_target PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wstrict-prototypes -Wmissing-prototypes -Wcast-qual -Wwrite-strings -Wformat=2 -Werror)\n")
+endif()
+
+string(REPLACE "\\" "/" source_path_cmake "${source_path}")
+string(REPLACE "\\" "/" include_dir_cmake "${include_dir}")
+
+file(WRITE "${project_file}" "cmake_minimum_required(VERSION 3.20)\n")
+file(APPEND "${project_file}" "project(compile_fail_target LANGUAGES C)\n")
+file(APPEND "${project_file}" "set(CMAKE_C_EXTENSIONS OFF)\n")
+file(APPEND "${project_file}" "set(CMAKE_C_STANDARD_REQUIRED ON)\n")
+file(APPEND "${project_file}" "set(CMAKE_C_STANDARD 99)\n")
+file(APPEND "${project_file}" "add_executable(compile_fail_target \"${source_path_cmake}\")\n")
+file(APPEND "${project_file}" "target_include_directories(compile_fail_target PRIVATE \"${include_dir_cmake}\")\n")
+file(APPEND "${project_file}" "${target_compile_options_block}")
+
+set(configure_cmd "${CMAKE_COMMAND}" -S "${project_dir}" -B "${build_dir}")
+if(DEFINED CMAKE_GENERATOR AND NOT CMAKE_GENERATOR STREQUAL "")
+  list(APPEND configure_cmd -G "${CMAKE_GENERATOR}")
+endif()
+if(DEFINED CMAKE_GENERATOR_PLATFORM AND NOT CMAKE_GENERATOR_PLATFORM STREQUAL "")
+  list(APPEND configure_cmd -A "${CMAKE_GENERATOR_PLATFORM}")
+endif()
+if(DEFINED CMAKE_GENERATOR_TOOLSET AND NOT CMAKE_GENERATOR_TOOLSET STREQUAL "")
+  list(APPEND configure_cmd -T "${CMAKE_GENERATOR_TOOLSET}")
+endif()
+if(DEFINED CMAKE_GENERATOR_INSTANCE AND NOT CMAKE_GENERATOR_INSTANCE STREQUAL "")
+  list(APPEND configure_cmd "-DCMAKE_GENERATOR_INSTANCE=${CMAKE_GENERATOR_INSTANCE}")
+endif()
+if(NOT is_msvc)
+  list(APPEND configure_cmd "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}")
 endif()
 
 execute_process(
-  COMMAND ${cmd}
-  RESULT_VARIABLE rc
-  OUTPUT_VARIABLE out
-  ERROR_VARIABLE err)
+  COMMAND ${configure_cmd}
+  RESULT_VARIABLE configure_rc
+  OUTPUT_VARIABLE configure_out
+  ERROR_VARIABLE configure_err)
 
-set(combined "${out}\n${err}")
+set(combined "${configure_out}\n${configure_err}")
 
-if(rc EQUAL 0)
+if(NOT configure_rc EQUAL 0)
+  message(FATAL_ERROR "failed to configure compile-fail project for ${SOURCE}\n${combined}")
+endif()
+
+set(build_cmd "${CMAKE_COMMAND}" --build "${build_dir}" --target compile_fail_target)
+if(DEFINED COMPILE_FAIL_CONFIG AND NOT COMPILE_FAIL_CONFIG STREQUAL "")
+  list(APPEND build_cmd --config "${COMPILE_FAIL_CONFIG}")
+endif()
+
+execute_process(
+  COMMAND ${build_cmd}
+  RESULT_VARIABLE build_rc
+  OUTPUT_VARIABLE build_out
+  ERROR_VARIABLE build_err)
+
+set(combined "${build_out}\n${build_err}")
+
+if(build_rc EQUAL 0)
   message(FATAL_ERROR "expected compile failure for ${SOURCE}")
 endif()
 
@@ -65,11 +110,6 @@ endforeach()
 
 if(NOT source_line_found)
   message(FATAL_ERROR "diagnostic did not mention ${SOURCE} line ${SOURCE_LINE}\n${combined}")
-endif()
-
-set(is_msvc FALSE)
-if(CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR CMAKE_C_SIMULATE_ID STREQUAL "MSVC")
-  set(is_msvc TRUE)
 endif()
 
 if(DIAGNOSTIC_CLASS STREQUAL "CALLBACK_MISMATCH")
