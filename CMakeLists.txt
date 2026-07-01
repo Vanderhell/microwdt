@@ -121,7 +121,7 @@ add_compile_fail_test(compile_fail_bad_clock compile_fail_bad_clock.c 16 "C4113|
 add_compile_fail_test(compile_fail_bad_timeout compile_fail_bad_timeout.c "11|3" "C4113|C4028|C4047|C4133" "incompatible-pointer-types|incompatible function pointer")
 add_compile_fail_test(compile_fail_bad_reset compile_fail_bad_reset.c "10|3" "C4113|C4028|C4047|C4133" "incompatible-pointer-types|incompatible function pointer")
 add_compile_fail_test(compile_fail_const_event compile_fail_const_event.c "6|3" "const object|read-only|C3892|C2166" "const object|const-qualified type|read-only object")
-add_compile_fail_test(compile_fail_old_layout compile_fail_old_layout.c 6 subscript "subscript|array index in non-array initializer|non-array initializer|non-array type")
+add_compile_fail_test(compile_fail_old_layout compile_fail_old_layout.c "6|5" "subscript|initializer|designator|C2059|C2078|C2143" "subscript|array index in non-array initializer|non-array initializer|non-array type")
 add_compile_fail_test(compile_fail_bad_assignment compile_fail_bad_assignment.c 11 "C4113|C4028|C4047|C4133" "incompatible-pointer-types|incompatible function pointer")
 
 install(TARGETS microwdt EXPORT microwdtTargets
