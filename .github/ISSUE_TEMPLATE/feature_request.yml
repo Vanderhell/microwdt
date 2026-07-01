@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a focused enhancement that fits microwdt scope.
+title: "[feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep requests aligned with the project scope: small C library, caller-owned storage, no RTOS or hardware driver layer.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What concrete integration problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: ABI, portability, runtime, or build constraints that matter.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This request does not require heap allocation.
+        - label: This request does not require RTOS wrappers or hardware watchdog drivers.
+        - label: This request can preserve caller-owned storage and strict warning gates.

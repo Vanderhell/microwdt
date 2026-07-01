@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/Vanderhell/microwdt/security
+    about: Use GitHub Security Advisories for suspected security-sensitive issues when available.

@@ -153,9 +153,11 @@ ctest --test-dir build --output-on-failure
 ## Documentation
 
 - [API reference](docs/API_REFERENCE.md)
+- [Cookbook](docs/COOKBOOK.md)
 - [Design notes](docs/DESIGN.md)
 - [Porting guide](docs/PORTING_GUIDE.md)
 - [Contributing guide](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 
 ## License
