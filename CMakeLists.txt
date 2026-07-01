@@ -99,25 +99,27 @@ add_test(NAME multi_call_line COMMAND multi_call_line)
 add_test(NAME readme_example COMMAND readme_example)
 add_test(NAME cpp_consumer COMMAND cpp_consumer)
 
-function(add_compile_fail_test test_name source pattern)
+function(add_compile_fail_test test_name source source_line msvc_patterns other_patterns)
   add_test(
     NAME ${test_name}
     COMMAND ${CMAKE_COMMAND}
-      -DSOURCE=${source}
-      -DPATTERN=${pattern}
-      -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
-      -DCMAKE_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}
-      -DCMAKE_C_COMPILER_FRONTEND_VARIANT=${CMAKE_C_COMPILER_FRONTEND_VARIANT}
-      -DCMAKE_C_SIMULATE_ID=${CMAKE_C_SIMULATE_ID}
+      "-DSOURCE=${source}"
+      "-DSOURCE_LINE=${source_line}"
+      "-DMSVC_PATTERNS=${msvc_patterns}"
+      "-DOTHER_PATTERNS=${other_patterns}"
+      "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
+      "-DCMAKE_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+      "-DCMAKE_C_COMPILER_FRONTEND_VARIANT=${CMAKE_C_COMPILER_FRONTEND_VARIANT}"
+      "-DCMAKE_C_SIMULATE_ID=${CMAKE_C_SIMULATE_ID}"
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_fail_runner.cmake)
 endfunction()
 
-add_compile_fail_test(compile_fail_bad_clock compile_fail_bad_clock.c C4113)
-add_compile_fail_test(compile_fail_bad_timeout compile_fail_bad_timeout.c C4113)
-add_compile_fail_test(compile_fail_bad_reset compile_fail_bad_reset.c C4113)
-add_compile_fail_test(compile_fail_const_event compile_fail_const_event.c const object)
-add_compile_fail_test(compile_fail_old_layout compile_fail_old_layout.c subscript)
-add_compile_fail_test(compile_fail_bad_assignment compile_fail_bad_assignment.c C4113)
+add_compile_fail_test(compile_fail_bad_clock compile_fail_bad_clock.c 16 C4113 "incompatible-pointer-types|incompatible function pointer")
+add_compile_fail_test(compile_fail_bad_timeout compile_fail_bad_timeout.c 11 C4113 "incompatible-pointer-types|incompatible function pointer")
+add_compile_fail_test(compile_fail_bad_reset compile_fail_bad_reset.c 10 C4113 "incompatible-pointer-types|incompatible function pointer")
+add_compile_fail_test(compile_fail_const_event compile_fail_const_event.c 13 "const object" "const object")
+add_compile_fail_test(compile_fail_old_layout compile_fail_old_layout.c 6 subscript "subscript|array index in non-array initializer|non-array initializer")
+add_compile_fail_test(compile_fail_bad_assignment compile_fail_bad_assignment.c 11 C4113 "incompatible-pointer-types|incompatible function pointer")
 
 install(TARGETS microwdt EXPORT microwdtTargets
   ARCHIVE DESTINATION lib

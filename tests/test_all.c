@@ -105,6 +105,18 @@ static void reset_fixture(void)
         } \
     } while (0)
 
+#define ASSERT_EQ_STATE(expected, actual) \
+    do { \
+        const mwdt_task_state_t mwdt_expected_value = (expected); \
+        const mwdt_task_state_t mwdt_actual_value = (actual); \
+        g_assertions++; \
+        if (mwdt_expected_value != mwdt_actual_value) { \
+            printf("FAIL\n  %s:%d: expected state %d, got %d\n", __FILE__, __LINE__, \
+                (int)mwdt_expected_value, (int)mwdt_actual_value); \
+            return false; \
+        } \
+    } while (0)
+
 #define ASSERT_EQ_U32(expected, actual) \
     do { \
         const uint32_t mwdt_expected_value = (expected); \
@@ -344,7 +356,7 @@ static bool test_time_boundaries_and_wrap(void)
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_SIZE(1U, timed_out);
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
-    ASSERT_EQ_INT(MWDT_TASK_LATE, state);
+    ASSERT_EQ_STATE(MWDT_TASK_LATE, state);
 
     reset_fixture();
     ASSERT_EQ_INT(MWDT_OK, mwdt_init(&g_fixture.wdt_a, &config));
@@ -353,7 +365,7 @@ static bool test_time_boundaries_and_wrap(void)
     g_fixture.clock_a.now_ms = 24U;
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
-    ASSERT_EQ_INT(MWDT_TASK_STARVED, state);
+    ASSERT_EQ_STATE(MWDT_TASK_STARVED, state);
     return true;
 }
 
@@ -372,7 +384,7 @@ static bool test_large_miss_counts_and_direct_starve(void)
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
     ASSERT_EQ_U32(255U, snapshot.miss_count);
-    ASSERT_EQ_INT(MWDT_TASK_LATE, snapshot.state);
+    ASSERT_EQ_STATE(MWDT_TASK_LATE, snapshot.state);
 
     g_fixture.clock_a.now_ms = 1256U;
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
@@ -390,7 +402,7 @@ static bool test_large_miss_counts_and_direct_starve(void)
     g_fixture.clock_a.now_ms = 1300U;
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
-    ASSERT_EQ_INT(MWDT_TASK_STARVED, snapshot.state);
+    ASSERT_EQ_STATE(MWDT_TASK_STARVED, snapshot.state);
     ASSERT_EQ_U32(3U, snapshot.miss_count);
     return true;
 }
@@ -408,16 +420,16 @@ static bool test_starved_monotonicity_and_recovery(void)
     g_fixture.clock_a.now_ms = 1200U;
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
-    ASSERT_EQ_INT(MWDT_TASK_STARVED, state);
+    ASSERT_EQ_STATE(MWDT_TASK_STARVED, state);
 
     g_fixture.clock_a.now_ms = 1300U;
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
-    ASSERT_EQ_INT(MWDT_TASK_STARVED, state);
+    ASSERT_EQ_STATE(MWDT_TASK_STARVED, state);
 
     ASSERT_EQ_INT(MWDT_OK, mwdt_kick(&g_fixture.wdt_a, index));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
-    ASSERT_EQ_INT(MWDT_TASK_OK, state);
+    ASSERT_EQ_STATE(MWDT_TASK_OK, state);
     return true;
 }
 
@@ -433,14 +445,14 @@ static bool test_enable_disable_and_disabled_kick(void)
     ASSERT_EQ_INT(MWDT_OK, mwdt_register(&g_fixture.wdt_a, "task", 100U, 2U, false, &index));
     ASSERT_EQ_INT(MWDT_OK, mwdt_enable(&g_fixture.wdt_a, index, false));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
-    ASSERT_EQ_INT(MWDT_TASK_DISABLED, state);
+    ASSERT_EQ_STATE(MWDT_TASK_DISABLED, state);
     ASSERT_EQ_INT(MWDT_ERR_DISABLED, mwdt_get_remaining(&g_fixture.wdt_a, index, &remaining));
     ASSERT_EQ_INT(MWDT_ERR_DISABLED, mwdt_kick(&g_fixture.wdt_a, index));
 
     g_fixture.clock_a.now_ms = 1500U;
     ASSERT_EQ_INT(MWDT_OK, mwdt_enable(&g_fixture.wdt_a, index, true));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
-    ASSERT_EQ_INT(MWDT_TASK_OK, state);
+    ASSERT_EQ_STATE(MWDT_TASK_OK, state);
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_remaining(&g_fixture.wdt_a, index, &remaining));
     ASSERT_EQ_U32(100U, remaining);
     return true;
@@ -485,10 +497,10 @@ static bool test_callback_observes_committed_state(void)
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_SIZE(1U, timed_out);
     ASSERT_EQ_INT(1, (int)g_fixture.timeout_log.calls);
-    ASSERT_EQ_INT(MWDT_TASK_STARVED, g_fixture.timeout_log.last_event.state);
-    ASSERT_EQ_INT(MWDT_TASK_OK, g_fixture.timeout_log.last_event.prev_state);
+    ASSERT_EQ_STATE(MWDT_TASK_STARVED, g_fixture.timeout_log.last_event.state);
+    ASSERT_EQ_STATE(MWDT_TASK_OK, g_fixture.timeout_log.last_event.prev_state);
     ASSERT_EQ_U32(2U, g_fixture.timeout_log.last_event.miss_count);
-    ASSERT_EQ_INT(MWDT_TASK_STARVED, g_fixture.timeout_log.queried_state);
+    ASSERT_EQ_STATE(MWDT_TASK_STARVED, g_fixture.timeout_log.queried_state);
     ASSERT_EQ_U32(2U, g_fixture.timeout_log.queried_miss_count);
     ASSERT_EQ_U32(1U, g_fixture.timeout_log.queried_transition_count);
     ASSERT_FALSE(g_fixture.timeout_log.queried_all_ok);
@@ -523,7 +535,7 @@ static bool test_callback_same_instance_busy(void)
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_count(&g_fixture.wdt_a, &count));
     ASSERT_EQ_SIZE(1U, count);
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task(&g_fixture.wdt_a, index, &snapshot));
-    ASSERT_EQ_INT(MWDT_TASK_LATE, snapshot.state);
+    ASSERT_EQ_STATE(MWDT_TASK_LATE, snapshot.state);
     ASSERT_EQ_U32(2U, snapshot.miss_count);
     return true;
 }
@@ -598,7 +610,7 @@ static bool test_two_starved_auto_reset_tasks_only_one_reset(void)
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_INT(1, (int)g_fixture.reset_log.calls);
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, second, &state));
-    ASSERT_EQ_INT(MWDT_TASK_OK, state);
+    ASSERT_EQ_STATE(MWDT_TASK_OK, state);
     return true;
 }
 
@@ -639,7 +651,7 @@ static bool test_no_timeout_callback_still_updates(void)
     g_fixture.clock_a.now_ms = 1200U;
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_a, &timed_out));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index, &state));
-    ASSERT_EQ_INT(MWDT_TASK_STARVED, state);
+    ASSERT_EQ_STATE(MWDT_TASK_STARVED, state);
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_transition_event_count(&g_fixture.wdt_a, &transition_count));
     ASSERT_EQ_U32(1U, transition_count);
     return true;
@@ -694,8 +706,8 @@ static bool test_two_instances_and_context_separation(void)
     ASSERT_EQ_INT(MWDT_OK, mwdt_check(&g_fixture.wdt_b, &timed_out));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_a, index_a, &state_a));
     ASSERT_EQ_INT(MWDT_OK, mwdt_get_task_state(&g_fixture.wdt_b, index_b, &state_b));
-    ASSERT_EQ_INT(MWDT_TASK_STARVED, state_a);
-    ASSERT_EQ_INT(MWDT_TASK_OK, state_b);
+    ASSERT_EQ_STATE(MWDT_TASK_STARVED, state_a);
+    ASSERT_EQ_STATE(MWDT_TASK_OK, state_b);
     ASSERT_TRUE(g_fixture.clock_a.calls > 0U);
     ASSERT_TRUE(g_fixture.clock_b.calls > 0U);
     return true;
