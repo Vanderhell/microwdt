@@ -23,7 +23,7 @@ static mwdt_err_t mwdt_require_initialized(const mwdt_t *wdt)
     return MWDT_OK;
 }
 
-static mwdt_err_t mwdt_require_mutable(mwdt_t *wdt)
+static mwdt_err_t mwdt_require_mutable(const mwdt_t *wdt)
 {
     mwdt_err_t err;
 

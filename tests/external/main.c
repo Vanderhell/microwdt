@@ -11,7 +11,7 @@ typedef struct {
 
 static uint32_t consumer_clock(void *ctx)
 {
-    consumer_ctx_t *consumer = (consumer_ctx_t *)ctx;
+    const consumer_ctx_t *consumer = (const consumer_ctx_t *)ctx;
     return consumer->now_ms;
 }
 

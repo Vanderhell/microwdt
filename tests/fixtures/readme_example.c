@@ -10,7 +10,7 @@ typedef struct {
 
 static uint32_t app_clock(void *ctx)
 {
-    app_ctx_t *app = (app_ctx_t *)ctx;
+    const app_ctx_t *app = (const app_ctx_t *)ctx;
     return app->now_ms;
 }
 
